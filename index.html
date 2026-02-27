@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>카메라 부재 감지</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <!-- 로딩 오버레이 -->
+  <div id="loading-overlay">
+    <div class="loading-content">
+      <div class="spinner"></div>
+      <p id="loading-message">AI 모델 로딩 중...</p>
+    </div>
+  </div>
+
+  <!-- 권한 오류 화면 -->
+  <div id="error-screen" class="hidden">
+    <div class="error-content">
+      <div class="error-icon">&#128247;</div>
+      <h2 id="error-title">카메라 오류</h2>
+      <p id="error-message">카메라에 접근할 수 없습니다.</p>
+      <button id="retry-btn" class="btn btn-primary">다시 시도</button>
+    </div>
+  </div>
+
+  <!-- 메인 앱 -->
+  <div id="app" class="hidden">
+
+    <!-- 헤더 -->
+    <header id="app-header">
+      <h1>카메라 부재 감지</h1>
+      <div class="header-controls">
+        <div id="status-badge" class="status-badge status-idle">대기 중</div>
+        <button id="settings-btn" class="btn btn-icon" title="설정">&#9881;</button>
+      </div>
+    </header>
+
+    <!-- 메인 컨텐츠 -->
+    <main id="main-content">
+
+      <!-- 비디오 뷰포트 -->
+      <div id="viewport-wrapper">
+        <div id="viewport">
+          <video id="camera-feed" autoplay playsinline muted></video>
+          <canvas id="overlay"></canvas>
+        </div>
+        <div id="zone-instruction" class="instruction-banner">
+          드래그하여 감지 영역을 설정하세요
+        </div>
+      </div>
+
+      <!-- 컨트롤 패널 -->
+      <div id="control-panel">
+        <button id="clear-zone-btn" class="btn btn-secondary" disabled>영역 초기화</button>
+        <button id="toggle-detection-btn" class="btn btn-primary" disabled>감지 시작</button>
+        <div id="alarm-indicator" class="alarm-indicator hidden">
+          <span class="alarm-pulse"></span>
+          경보 발생!
+        </div>
+      </div>
+
+    </main>
+
+  </div>
+
+  <!-- 설정 패널 -->
+  <div id="settings-panel" class="hidden">
+    <div id="settings-overlay"></div>
+    <div id="settings-drawer">
+      <div class="settings-header">
+        <h2>설정</h2>
+        <button id="settings-close-btn" class="btn btn-icon">&#10005;</button>
+      </div>
+      <div class="settings-body">
+
+        <section class="settings-section">
+          <h3>감지</h3>
+          <div class="setting-item">
+            <label>감지 속도</label>
+            <div class="radio-group">
+              <label><input type="radio" name="detection-speed" value="500"> 느림</label>
+              <label><input type="radio" name="detection-speed" value="200" checked> 보통</label>
+              <label><input type="radio" name="detection-speed" value="100"> 빠름</label>
+            </div>
+          </div>
+          <div class="setting-item">
+            <label for="confidence-slider">신뢰도 임계값: <span id="confidence-value">0.5</span></label>
+            <input type="range" id="confidence-slider" min="0.3" max="0.9" step="0.05" value="0.5">
+          </div>
+          <div class="setting-item">
+            <label class="toggle-label">
+              <span>바운딩 박스 표시</span>
+              <input type="checkbox" id="show-bbox-toggle">
+              <span class="toggle-switch"></span>
+            </label>
+          </div>
+        </section>
+
+        <section class="settings-section">
+          <h3>경보</h3>
+          <div class="setting-item">
+            <label class="toggle-label">
+              <span>경보 활성화</span>
+              <input type="checkbox" id="alarm-enabled-toggle" checked>
+              <span class="toggle-switch"></span>
+            </label>
+          </div>
+          <div class="setting-item">
+            <label for="volume-slider">볼륨: <span id="volume-value">50</span>%</label>
+            <input type="range" id="volume-slider" min="0" max="1" step="0.05" value="0.5">
+          </div>
+          <div class="setting-item">
+            <label for="delay-slider">부재 판단 지연: <span id="delay-value">2</span>초</label>
+            <input type="range" id="delay-slider" min="1" max="10" step="1" value="2">
+          </div>
+        </section>
+
+        <section class="settings-section">
+          <h3>영역</h3>
+          <div class="setting-item">
+            <label class="toggle-label">
+              <span>영역 테두리 표시</span>
+              <input type="checkbox" id="show-zone-toggle" checked>
+              <span class="toggle-switch"></span>
+            </label>
+          </div>
+        </section>
+
+      </div>
+    </div>
+  </div>
+
+  <!-- TensorFlow.js CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js"></script>
+
+  <!-- 앱 모듈 (의존 순서대로) -->
+  <script src="js/camera.js"></script>
+  <script src="js/canvas.js"></script>
+  <script src="js/zone.js"></script>
+  <script src="js/intersection.js"></script>
+  <script src="js/detector.js"></script>
+  <script src="js/alarm.js"></script>
+  <script src="js/settings.js"></script>
+  <script src="js/app.js"></script>
+
+</body>
+</html>
