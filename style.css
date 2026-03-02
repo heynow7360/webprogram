@@ -85,6 +85,36 @@ ul { list-style: none; }
   border: 1px solid var(--border);
 }
 
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.export-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 500;
+  transition: color var(--trans), border-color var(--trans), background var(--trans);
+}
+.export-btn:hover { color: var(--text); border-color: var(--blue); background: rgba(59,130,246,0.08); }
+.export-btn:active { transform: scale(0.96); }
+/* 기록이 없으면 비활성 */
+.export-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+
+/* 모바일에서 텍스트 숨기기 */
+@media (max-width: 380px) {
+  .export-label { display: none; }
+  .export-btn { padding: 7px 10px; }
+}
+
 /* 추가 화면 헤더 */
 .form-header {
   padding: 0 12px 0 8px;
