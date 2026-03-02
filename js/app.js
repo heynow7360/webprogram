@@ -1,315 +1,563 @@
 'use strict';
 
-/**
- * App — 최상위 오케스트레이터
- *
- * 시작 순서:
- *   1. DOM ready
- *   2. localStorage 설정 로드 + UI 바인딩
- *   3. CameraManager.start()
- *      └─ loadedmetadata:
- *         4. CanvasManager.sizeToVideo()
- *         5. ZoneManager.init
- *         6. DetectorManager.loadModel()  (로딩 오버레이)
- *            └─ 모델 준비:
- *               7. 오버레이 숨김, 감지 루프 시작
- */
+/* =============================================
+   앱 상태
+============================================= */
+const state = {
+  selectedDate:     null,   // 'YYYY-MM-DD'
+  selectedStart:    null,   // 'HH:MM'
+  selectedEnd:      null,   // 'HH:MM'
+  durationH:        0,
+  durationM:        0,
+  selectedSubject:  null,
+  concentration:    null,
+  // 시간 피커 현재 타겟 ('start' | 'end')
+  timePicking:      'start',
+  // 달력 현재 표시 연월
+  calYear:          new Date().getFullYear(),
+  calMonth:         new Date().getMonth(),
+  calSelected:      null,   // 'YYYY-MM-DD'
+  // 드럼 현재 값
+  drumH:            9,
+  drumM:            0,
+};
 
-document.addEventListener('DOMContentLoaded', () => {
+/* =============================================
+   유틸
+============================================= */
+function pad(n)  { return String(n).padStart(2, '0'); }
+function today() {
+  const d = new Date();
+  return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
+}
+function formatDate(ds) {
+  if (!ds) return '';
+  const d = new Date(ds + 'T00:00:00');
+  const days = ['일','월','화','수','목','금','토'];
+  return `${d.getFullYear()}년 ${d.getMonth()+1}월 ${d.getDate()}일 (${days[d.getDay()]})`;
+}
+function formatDuration(h, m) {
+  const parts = [];
+  if (h > 0) parts.push(`${h}시간`);
+  if (m > 0) parts.push(`${m}분`);
+  return parts.length ? parts.join(' ') : '0분';
+}
 
-  // ── DOM 참조 ─────────────────────────────────────────────
-  const videoEl       = document.getElementById('camera-feed');
-  const canvasEl      = document.getElementById('overlay');
-  const loadingOverlay = document.getElementById('loading-overlay');
-  const loadingMsg    = document.getElementById('loading-message');
-  const errorScreen   = document.getElementById('error-screen');
-  const errorTitle    = document.getElementById('error-title');
-  const errorMsg      = document.getElementById('error-message');
-  const retryBtn      = document.getElementById('retry-btn');
-  const appEl         = document.getElementById('app');
-  const statusBadge   = document.getElementById('status-badge');
-  const clearZoneBtn  = document.getElementById('clear-zone-btn');
-  const toggleDetBtn  = document.getElementById('toggle-detection-btn');
-  const alarmIndicator = document.getElementById('alarm-indicator');
-  const zoneInstruction = document.getElementById('zone-instruction');
+/* =============================================
+   스크린 전환
+============================================= */
+function showScreen(id) {
+  document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+  document.getElementById(id).classList.add('active');
+  // 폼 화면에서는 FAB 숨기기
+  const fabWrap = document.getElementById('fab-wrap');
+  fabWrap.style.display = (id === 'add-screen') ? 'none' : '';
+  window.scrollTo(0, 0);
+}
 
-  // ── 컴포넌트 초기화 ─────────────────────────────────────
-  const settings  = new SettingsManager();
-  const camera    = new CameraManager(videoEl);
-  const alarm     = new AlarmManager();
-  let   canvas    = null;  // CanvasManager (비디오 로드 후 생성)
-  let   zone      = null;  // ZoneManager
-  let   detector  = null;  // DetectorManager
-  let   tracker   = null;  // PresenceTracker
+/* =============================================
+   홈 — 기록 렌더링
+============================================= */
+function renderRecords() {
+  const list  = document.getElementById('records-list');
+  const empty = document.getElementById('empty-state');
+  const count = document.getElementById('record-count');
+  const records = Storage.getAll();
 
-  let detectionActive = false;
-  let lastPersons     = [];
-  let presenceState   = 'present';  // 'present' | 'absent'
+  list.innerHTML = '';
 
-  // ── 설정 UI 바인딩 ───────────────────────────────────────
-  settings.bindUI();
-  settings.onChange = (key, value) => {
-    if (detector) {
-      if (key === 'detectionIntervalMs') detector.intervalMs = value;
+  if (records.length === 0) {
+    empty.classList.remove('hidden');
+    count.textContent = '';
+    return;
+  }
+  empty.classList.add('hidden');
+  count.textContent = `${records.length}개`;
+
+  records.forEach(r => {
+    const concClass = r.concentration <= 4 ? 'badge-low'
+                    : r.concentration <= 7 ? 'badge-mid' : 'badge-high';
+    const li = document.createElement('li');
+    li.className = 'record-card';
+    li.dataset.id = r.id;
+
+    const meta = [];
+    meta.push(`⏱ ${formatDuration(r.durationH, r.durationM)}`);
+    if (r.startTime) {
+      let t = `🕐 ${r.startTime}`;
+      if (r.endTime) t += ` ~ ${r.endTime}`;
+      meta.push(t);
     }
-    if (alarm) {
-      if (key === 'alarmVolume')  alarm.setVolume(value);
-      if (key === 'alarmEnabled') alarm.setEnabled(value);
-    }
-    if (tracker && key === 'absenceDelaySeconds') {
-      tracker.absenceThreshold = Math.round(value / (settings.values.detectionIntervalMs / 1000));
-    }
-  };
+    if (r.method) meta.push(`📖 ${r.method}`);
 
-  // 초기 경보 설정 적용
-  alarm.setVolume(settings.values.alarmVolume);
-  alarm.setEnabled(settings.values.alarmEnabled);
+    li.innerHTML = `
+      <div class="card-top">
+        <div>
+          <div class="card-date">${formatDate(r.date)}</div>
+          <div class="card-subject">${r.subject}</div>
+        </div>
+        <span class="card-badge ${concClass}">집중도 ${r.concentration}</span>
+      </div>
+      <div class="card-meta">${meta.map(m => `<span>${m}</span>`).join('')}</div>
+      <button class="card-delete" data-id="${r.id}">삭제</button>
+    `;
+    list.appendChild(li);
+  });
 
-  // ── 유틸 ─────────────────────────────────────────────────
-  function setStatus(state, label) {
-    statusBadge.className = 'status-badge status-' + state;
-    statusBadge.textContent = label;
-  }
-
-  function showLoading(msg) {
-    loadingMsg.textContent = msg;
-    loadingOverlay.classList.remove('hidden');
-  }
-
-  function hideLoading() {
-    loadingOverlay.classList.add('hidden');
-  }
-
-  function showError(title, msg) {
-    hideLoading();
-    appEl.classList.add('hidden');
-    errorTitle.textContent  = title;
-    errorMsg.textContent    = msg;
-    errorScreen.classList.remove('hidden');
-  }
-
-  function hideError() {
-    errorScreen.classList.add('hidden');
-  }
-
-  // ── 카메라 시작 ──────────────────────────────────────────
-  function startCamera() {
-    showLoading('카메라 연결 중...');
-    hideError();
-    camera.start();
-  }
-
-  camera.onReady = (video) => {
-    // 앱 화면 표시
-    appEl.classList.remove('hidden');
-
-    // 캔버스 설정
-    canvas = new CanvasManager(video, canvasEl);
-    canvas.sizeToVideo();
-
-    // 존 설정
-    zone = new ZoneManager(canvas);
-    zone.enable();
-    zone.onZoneChanged = (z) => {
-      clearZoneBtn.disabled = !z;
-      if (z) {
-        zoneInstruction.textContent = '감지 영역이 설정되었습니다. 감지 시작을 눌러주세요.';
-        toggleDetBtn.disabled = false;
-        // 트래커 리셋
-        if (tracker) tracker.reset();
-      } else {
-        zoneInstruction.textContent = '드래그하여 감지 영역을 설정하세요';
-        toggleDetBtn.disabled = true;
-        stopDetection();
+  // 삭제 버튼 (데스크톱 hover)
+  list.querySelectorAll('.card-delete').forEach(btn => {
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      if (confirm('이 기록을 삭제할까요?')) {
+        Storage.remove(btn.dataset.id);
+        renderRecords();
       }
-    };
-
-    // 모델 로딩
-    showLoading('AI 감지 모델 로딩 중... (첫 실행 시 수 초 소요)');
-    detector = new DetectorManager(video);
-    detector.intervalMs = settings.values.detectionIntervalMs;
-
-    detector.onModelLoaded = () => {
-      hideLoading();
-      setStatus('idle', '대기 중');
-
-      // 탐지 루프 연결
-      detector.onDetection = onDetectionResult;
-
-      // 렌더 루프 시작 (항상 실행, 존/바운딩박스 표시용)
-      startRenderLoop();
-    };
-
-    detector.onError = (err) => {
-      console.error('[Detector]', err);
-      showError('모델 로딩 실패', 'AI 모델을 불러오지 못했습니다.\n인터넷 연결을 확인하고 페이지를 새로고침해 주세요.');
-    };
-
-    detector.loadModel();
-  };
-
-  camera.onError = (type, msg) => {
-    const titles = {
-      permission:  '카메라 권한 필요',
-      notfound:    '카메라 없음',
-      inuse:       '카메라 사용 중',
-      constraints: '카메라 오류',
-      https:       'HTTPS 필요',
-      unknown:     '카메라 오류'
-    };
-    showError(titles[type] || '카메라 오류', msg);
-  };
-
-  camera.onEnded = () => {
-    stopDetection();
-    showError('카메라 연결 끊김', '카메라 연결이 끊겼습니다.\n카메라를 확인하고 다시 시도해 주세요.');
-  };
-
-  // ── 감지 결과 처리 ───────────────────────────────────────
-  function onDetectionResult(persons) {
-    lastPersons = persons;
-
-    if (!detectionActive || !zone || !zone.zone) return;
-
-    const inZone = isPersonInZone(persons, zone.zone, settings.values.confidenceThreshold);
-    const result = tracker.update(inZone);
-
-    if (result.changed) {
-      presenceState = result.state;
-      updateAlarm();
-      updateStatusBadge();
-    }
-  }
-
-  function updateAlarm() {
-    if (presenceState === 'absent' && detectionActive && zone && zone.zone) {
-      alarm.start();
-      alarmIndicator.classList.remove('hidden');
-    } else {
-      alarm.stop();
-      alarmIndicator.classList.add('hidden');
-    }
-  }
-
-  function updateStatusBadge() {
-    if (!detectionActive) {
-      setStatus('idle', '대기 중');
-    } else if (presenceState === 'present') {
-      setStatus('present', '감지됨');
-    } else {
-      setStatus('absent', '부재');
-    }
-  }
-
-  // ── 렌더 루프 (requestAnimationFrame) ───────────────────
-  let renderRafId = null;
-
-  function startRenderLoop() {
-    if (renderRafId) return;
-    renderFrame();
-  }
-
-  function renderFrame() {
-    renderRafId = requestAnimationFrame(renderFrame);
-    if (!canvas) return;
-
-    const ctx = canvas.getContext();
-    canvas.clear();
-
-    // 존 그리기
-    if (settings.values.showZoneOutline && zone) {
-      let personPresent = null;
-      if (detectionActive) {
-        personPresent = presenceState === 'present';
-      }
-      zone.draw(ctx, personPresent);
-    }
-
-    // 바운딩 박스 그리기
-    if (settings.values.showBoundingBoxes && lastPersons.length > 0) {
-      drawBoundingBoxes(ctx, lastPersons, settings.values.confidenceThreshold);
-    }
-  }
-
-  function drawBoundingBoxes(ctx, persons, minScore) {
-    persons.forEach(p => {
-      if (p.score < minScore) return;
-      const [x, y, w, h] = p.bbox;
-      ctx.save();
-      ctx.strokeStyle = 'rgba(255, 200, 0, 0.85)';
-      ctx.lineWidth = 2;
-      ctx.strokeRect(x, y, w, h);
-      ctx.fillStyle = 'rgba(255, 200, 0, 0.85)';
-      ctx.font = '12px sans-serif';
-      ctx.fillText(`사람 ${Math.round(p.score * 100)}%`, x + 4, y > 16 ? y - 4 : y + 14);
-      ctx.restore();
     });
+  });
+
+  // 모바일 롱프레스 삭제
+  list.querySelectorAll('.record-card').forEach(card => {
+    let timer = null;
+    card.addEventListener('pointerdown', () => {
+      timer = setTimeout(() => {
+        if (confirm('이 기록을 삭제할까요?')) {
+          Storage.remove(card.dataset.id);
+          renderRecords();
+        }
+      }, 700);
+    });
+    card.addEventListener('pointerup',    () => clearTimeout(timer));
+    card.addEventListener('pointerleave', () => clearTimeout(timer));
+    card.addEventListener('pointermove',  () => clearTimeout(timer));
+  });
+}
+
+/* =============================================
+   FAB
+============================================= */
+function initFab() {
+  const btn  = document.getElementById('fab-btn');
+  const menu = document.getElementById('fab-menu');
+  const bdp  = document.getElementById('backdrop');
+
+  function openFab() {
+    menu.classList.add('open');
+    btn.classList.add('open');
+    bdp.classList.add('active');
+    btn.setAttribute('aria-label', '메뉴 닫기');
+    menu.setAttribute('aria-hidden', 'false');
+  }
+  function closeFab() {
+    menu.classList.remove('open');
+    btn.classList.remove('open');
+    bdp.classList.remove('active');
+    btn.setAttribute('aria-label', '메뉴 열기');
+    menu.setAttribute('aria-hidden', 'true');
   }
 
-  // ── 감지 시작/중지 ───────────────────────────────────────
-  function startDetection() {
-    if (!detector || !detector.isLoaded()) return;
+  btn.addEventListener('click', () => {
+    menu.classList.contains('open') ? closeFab() : openFab();
+  });
 
-    const fps5frames = Math.round(settings.values.absenceDelaySeconds / (settings.values.detectionIntervalMs / 1000));
-    tracker = new PresenceTracker(Math.max(1, fps5frames), 3);
-    presenceState = 'present';
+  bdp.addEventListener('click', () => {
+    closeFab();
+    closeAllModals();
+  });
 
-    detectionActive = true;
-    detector.start();
+  document.getElementById('btn-add-study').addEventListener('click', () => {
+    closeFab();
+    resetForm();
+    showScreen('add-screen');
+  });
 
-    toggleDetBtn.textContent = '감지 중지';
-    toggleDetBtn.classList.add('active');
-    zoneInstruction.textContent = '영역 안에 사람이 없으면 경보가 울립니다';
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape') { closeFab(); closeAllModals(); }
+  });
+}
 
-    alarm.init();  // AudioContext 준비
-    updateStatusBadge();
+/* =============================================
+   모달 공통 열기/닫기
+============================================= */
+let _currentModal = null;
+
+function openModal(id) {
+  closeAllModals();
+  _currentModal = id;
+  document.getElementById(id).classList.add('open');
+  document.getElementById('backdrop').classList.add('active');
+}
+
+function closeModal(id) {
+  document.getElementById(id).classList.remove('open');
+  document.getElementById('backdrop').classList.remove('active');
+  _currentModal = null;
+}
+
+function closeAllModals() {
+  ['date-modal','time-modal','duration-modal','subject-modal'].forEach(id => {
+    document.getElementById(id).classList.remove('open');
+  });
+  _currentModal = null;
+}
+
+// 닫기(✕) 버튼 공통
+document.querySelectorAll('.modal-close').forEach(btn => {
+  btn.addEventListener('click', () => {
+    if (btn.dataset.close) closeModal(btn.dataset.close);
+  });
+});
+
+// 백드롭 클릭 → 현재 모달 닫기 (FAB 닫기는 initFab 에서 처리)
+document.getElementById('backdrop').addEventListener('click', () => {
+  if (_currentModal) closeModal(_currentModal);
+});
+
+/* =============================================
+   달력 피커
+============================================= */
+function buildCalendar() {
+  const grid  = document.getElementById('cal-grid');
+  const label = document.getElementById('cal-label');
+  const y = state.calYear, m = state.calMonth;
+
+  label.textContent = `${y}년 ${m+1}월`;
+
+  const firstDay    = new Date(y, m, 1).getDay();
+  const daysInMonth = new Date(y, m+1, 0).getDate();
+  const todayStr    = today();
+
+  let html = '';
+  for (let i = 0; i < firstDay; i++) {
+    html += '<div class="cal-day cal-empty"></div>';
   }
+  for (let d = 1; d <= daysInMonth; d++) {
+    const ds = `${y}-${pad(m+1)}-${pad(d)}`;
+    const cls = ['cal-day',
+      ds === todayStr          ? 'cal-today'    : '',
+      ds === state.calSelected ? 'cal-selected' : '',
+    ].filter(Boolean).join(' ');
+    html += `<div class="${cls}" data-date="${ds}">${d}</div>`;
+  }
+  grid.innerHTML = html;
 
-  function stopDetection() {
-    detectionActive = false;
-    if (detector) detector.stop();
-    alarm.stop();
-    alarmIndicator.classList.add('hidden');
-    lastPersons = [];
-    presenceState = 'present';
+  grid.querySelectorAll('.cal-day:not(.cal-empty)').forEach(el => {
+    el.addEventListener('click', () => {
+      state.calSelected = el.dataset.date;
+      buildCalendar();
+    });
+  });
+}
 
-    toggleDetBtn.textContent = '감지 시작';
-    toggleDetBtn.classList.remove('active');
-    if (zone && zone.zone) {
-      zoneInstruction.textContent = '감지 영역이 설정되었습니다. 감지 시작을 눌러주세요.';
+function initDatePicker() {
+  document.getElementById('trigger-date').addEventListener('click', () => {
+    state.calSelected = state.selectedDate || today();
+    const d = new Date(state.calSelected + 'T00:00:00');
+    state.calYear  = d.getFullYear();
+    state.calMonth = d.getMonth();
+    buildCalendar();
+    openModal('date-modal');
+  });
+
+  document.getElementById('cal-prev').addEventListener('click', () => {
+    state.calMonth--;
+    if (state.calMonth < 0) { state.calMonth = 11; state.calYear--; }
+    buildCalendar();
+  });
+  document.getElementById('cal-next').addEventListener('click', () => {
+    state.calMonth++;
+    if (state.calMonth > 11) { state.calMonth = 0; state.calYear++; }
+    buildCalendar();
+  });
+
+  document.getElementById('date-confirm').addEventListener('click', () => {
+    if (state.calSelected) {
+      state.selectedDate = state.calSelected;
+      document.getElementById('display-date').textContent = formatDate(state.selectedDate);
+      document.getElementById('trigger-date').classList.add('filled');
+      document.getElementById('ff-date').classList.remove('shake');
     }
-    setStatus('idle', '대기 중');
-  }
+    closeModal('date-modal');
+  });
+}
 
-  // ── 버튼 이벤트 ─────────────────────────────────────────
-  toggleDetBtn.addEventListener('click', () => {
-    alarm.init();  // 사용자 제스처 시점에 AudioContext 초기화
-    if (detectionActive) {
-      stopDetection();
+/* =============================================
+   드럼롤 시간 피커
+============================================= */
+const ITEM_H = 36;  // px per drum item
+const PAD    = 2;   // ghost items for centering
+
+function buildDrumColumn(itemsEl, scrollEl, values, currentVal, onChange) {
+  // 위아래 빈 칸 (선택 항목이 가운데 오도록)
+  let html = `<div class="drum-item" aria-hidden="true"></div>`.repeat(PAD);
+  values.forEach(v => {
+    const sel = v === currentVal ? ' selected' : '';
+    html += `<div class="drum-item${sel}" data-val="${v}">${pad(v)}</div>`;
+  });
+  html += `<div class="drum-item" aria-hidden="true"></div>`.repeat(PAD);
+  itemsEl.innerHTML = html;
+
+  // 선택값으로 스크롤
+  const idx = values.indexOf(currentVal);
+  scrollEl.scrollTop = Math.max(0, idx * ITEM_H);
+
+  // 스크롤 끝날 때 스냅
+  let snapTimer = null;
+  scrollEl.addEventListener('scroll', () => {
+    clearTimeout(snapTimer);
+    snapTimer = setTimeout(() => {
+      const rawIdx  = scrollEl.scrollTop / ITEM_H;
+      const snapIdx = Math.max(0, Math.min(Math.round(rawIdx), values.length - 1));
+      scrollEl.scrollTop = snapIdx * ITEM_H;
+
+      const val = values[snapIdx];
+      onChange(val);
+      itemsEl.querySelectorAll('.drum-item[data-val]').forEach(el => {
+        el.classList.toggle('selected', Number(el.dataset.val) === val);
+      });
+    }, 80);
+  }, { passive: true });
+
+  // 마우스 드래그 (데스크톱)
+  addMouseDrag(scrollEl);
+}
+
+function addMouseDrag(el) {
+  let startY = 0, startScroll = 0, dragging = false;
+  el.addEventListener('mousedown', e => {
+    dragging = true;
+    startY = e.clientY;
+    startScroll = el.scrollTop;
+    e.preventDefault();
+  });
+  document.addEventListener('mousemove', e => {
+    if (!dragging) return;
+    el.scrollTop = startScroll - (e.clientY - startY);
+  });
+  document.addEventListener('mouseup', () => { dragging = false; });
+}
+
+function openTimePicker(target) {
+  state.timePicking = target;
+  document.getElementById('time-modal-title').textContent =
+    target === 'start' ? '시작 시간 선택' : '종료 시간 선택';
+
+  const curVal = target === 'start' ? state.selectedStart : state.selectedEnd;
+  let h = 9, m = 0;
+  if (curVal) { const p = curVal.split(':').map(Number); h = p[0]; m = p[1]; }
+  state.drumH = h;
+  state.drumM = m;
+
+  const hours   = Array.from({length: 24}, (_, i) => i);
+  const minutes = Array.from({length: 60}, (_, i) => i);
+
+  buildDrumColumn(
+    document.getElementById('drum-h-items'),
+    document.getElementById('drum-h'),
+    hours, h, v => { state.drumH = v; }
+  );
+  buildDrumColumn(
+    document.getElementById('drum-m-items'),
+    document.getElementById('drum-m'),
+    minutes, m, v => { state.drumM = v; }
+  );
+
+  openModal('time-modal');
+}
+
+function initTimePicker() {
+  document.getElementById('trigger-start').addEventListener('click', () => openTimePicker('start'));
+  document.getElementById('trigger-end').addEventListener('click',   () => openTimePicker('end'));
+
+  document.getElementById('time-confirm').addEventListener('click', () => {
+    const val = `${pad(state.drumH)}:${pad(state.drumM)}`;
+    if (state.timePicking === 'start') {
+      state.selectedStart = val;
+      document.getElementById('display-start').textContent = val;
+      document.getElementById('trigger-start').classList.add('filled');
     } else {
-      startDetection();
+      state.selectedEnd = val;
+      document.getElementById('display-end').textContent = val;
+      document.getElementById('trigger-end').classList.add('filled');
     }
+    closeModal('time-modal');
+  });
+}
+
+/* =============================================
+   공부시간 스피너
+============================================= */
+function initDurationPicker() {
+  const hEl = document.getElementById('dur-h');
+  const mEl = document.getElementById('dur-m');
+
+  function sync() {
+    hEl.textContent = state.durationH;
+    mEl.textContent = pad(state.durationM);
+  }
+
+  document.getElementById('trigger-duration').addEventListener('click', () => {
+    sync();
+    openModal('duration-modal');
   });
 
-  clearZoneBtn.addEventListener('click', () => {
-    if (zone) zone.clearZone();
-    stopDetection();
+  // 시간
+  document.getElementById('hr-up').addEventListener('click', () => {
+    state.durationH = Math.min(23, state.durationH + 1); sync();
+  });
+  document.getElementById('hr-down').addEventListener('click', () => {
+    state.durationH = Math.max(0, state.durationH - 1); sync();
   });
 
-  retryBtn.addEventListener('click', () => {
-    startCamera();
+  // 분 (5분 단위)
+  document.getElementById('mn-up').addEventListener('click', () => {
+    state.durationM = state.durationM >= 55 ? 0 : state.durationM + 5; sync();
+  });
+  document.getElementById('mn-down').addEventListener('click', () => {
+    state.durationM = state.durationM <= 0 ? 55 : state.durationM - 5; sync();
   });
 
-  // ── 탭 비활성화 시 경보 일시정지 ──────────────────────────
-  document.addEventListener('visibilitychange', () => {
-    if (document.hidden) {
-      alarm.stop();
-    } else {
-      updateAlarm();
+  document.getElementById('dur-confirm').addEventListener('click', () => {
+    document.getElementById('display-duration').textContent =
+      formatDuration(state.durationH, state.durationM);
+    document.getElementById('trigger-duration').classList.add('filled');
+    document.getElementById('ff-duration').classList.remove('shake');
+    closeModal('duration-modal');
+  });
+}
+
+/* =============================================
+   과목 피커
+============================================= */
+function initSubjectPicker() {
+  document.getElementById('trigger-subject').addEventListener('click', () => {
+    document.querySelectorAll('.subject-item').forEach(li => {
+      li.classList.toggle('picked', li.dataset.val === state.selectedSubject);
+    });
+    openModal('subject-modal');
+  });
+
+  document.getElementById('subject-list').addEventListener('click', e => {
+    const item = e.target.closest('.subject-item');
+    if (!item) return;
+    state.selectedSubject = item.dataset.val;
+    document.querySelectorAll('.subject-item').forEach(li => li.classList.remove('picked'));
+    item.classList.add('picked');
+
+    document.getElementById('display-subject').textContent = state.selectedSubject;
+    document.getElementById('trigger-subject').classList.add('filled');
+    document.getElementById('ff-subject').classList.remove('shake');
+    closeModal('subject-modal');
+  });
+}
+
+/* =============================================
+   집중도 버튼
+============================================= */
+function initConcentration() {
+  const grid = document.getElementById('conc-grid');
+  let html = '';
+  for (let i = 1; i <= 10; i++) {
+    html += `<button type="button" class="conc-btn" data-val="${i}">${i}</button>`;
+  }
+  grid.innerHTML = html;
+
+  grid.addEventListener('click', e => {
+    const btn = e.target.closest('.conc-btn');
+    if (!btn) return;
+    grid.querySelectorAll('.conc-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    state.concentration = parseInt(btn.dataset.val);
+    document.getElementById('ff-conc').classList.remove('shake');
+  });
+}
+
+/* =============================================
+   폼 리셋
+============================================= */
+function resetForm() {
+  state.selectedDate    = null;
+  state.selectedStart   = null;
+  state.selectedEnd     = null;
+  state.durationH       = 0;
+  state.durationM       = 0;
+  state.selectedSubject = null;
+  state.concentration   = null;
+
+  document.getElementById('display-date').textContent     = '날짜를 선택하세요';
+  document.getElementById('display-start').textContent    = '--:--';
+  document.getElementById('display-end').textContent      = '--:--';
+  document.getElementById('display-duration').textContent = '시간/분 선택';
+  document.getElementById('display-subject').textContent  = '과목을 선택하세요';
+  document.getElementById('input-method').value           = '';
+
+  ['trigger-date','trigger-start','trigger-end','trigger-duration','trigger-subject']
+    .forEach(id => document.getElementById(id).classList.remove('filled'));
+
+  document.querySelectorAll('.conc-btn').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.subject-item').forEach(li => li.classList.remove('picked'));
+}
+
+/* =============================================
+   폼 제출
+============================================= */
+function shake(id) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.classList.remove('shake');
+  void el.offsetWidth;  // reflow to restart animation
+  el.classList.add('shake');
+  el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+
+function initForm() {
+  document.getElementById('back-btn').addEventListener('click', () => {
+    showScreen('home-screen');
+    renderRecords();
+  });
+
+  document.getElementById('study-form').addEventListener('submit', e => {
+    e.preventDefault();
+
+    if (!state.selectedDate) {
+      shake('ff-date'); return;
     }
+    if (state.durationH === 0 && state.durationM === 0) {
+      shake('ff-duration'); return;
+    }
+    if (!state.selectedSubject) {
+      shake('ff-subject'); return;
+    }
+    if (!state.concentration) {
+      shake('ff-conc'); return;
+    }
+
+    const record = {
+      date:          state.selectedDate,
+      startTime:     state.selectedStart,
+      endTime:       state.selectedEnd,
+      durationH:     state.durationH,
+      durationM:     state.durationM,
+      subject:       state.selectedSubject,
+      method:        document.getElementById('input-method').value.trim(),
+      concentration: state.concentration,
+    };
+
+    Storage.save(record);
+    showScreen('home-screen');
+    renderRecords();
   });
+}
 
-  // ── 시작 ─────────────────────────────────────────────────
-  startCamera();
-
+/* =============================================
+   앱 초기화
+============================================= */
+document.addEventListener('DOMContentLoaded', () => {
+  initFab();
+  initDatePicker();
+  initTimePicker();
+  initDurationPicker();
+  initSubjectPicker();
+  initConcentration();
+  initForm();
+  renderRecords();
 });
