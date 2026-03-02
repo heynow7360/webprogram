@@ -66,13 +66,17 @@ function renderRecords() {
 
   list.innerHTML = '';
 
+  const exportBtn = document.getElementById('export-btn');
+
   if (records.length === 0) {
     empty.classList.remove('hidden');
     count.textContent = '';
+    exportBtn.disabled = true;
     return;
   }
   empty.classList.add('hidden');
   count.textContent = `${records.length}개`;
+  exportBtn.disabled = false;
 
   records.forEach(r => {
     const concClass = r.concentration <= 4 ? 'badge-low'
@@ -549,6 +553,62 @@ function initForm() {
 }
 
 /* =============================================
+   JSON 내보내기
+============================================= */
+function exportJSON() {
+  const records = Storage.getAll();
+
+  const data = {
+    exportDate:   new Date().toISOString(),
+    totalRecords: records.length,
+    summary: {
+      subjects:    [...new Set(records.map(r => r.subject))],
+      dateRange: records.length
+        ? { from: records[records.length - 1].date, to: records[0].date }
+        : null,
+      avgConcentration: records.length
+        ? Math.round(records.reduce((s, r) => s + r.concentration, 0) / records.length * 10) / 10
+        : null,
+      totalStudyMinutes: records.reduce((s, r) => s + r.durationH * 60 + r.durationM, 0),
+    },
+    records: records.map(r => ({
+      id:            r.id,
+      date:          r.date,
+      startTime:     r.startTime  || null,
+      endTime:       r.endTime    || null,
+      durationHours: r.durationH,
+      durationMinutes: r.durationM,
+      totalMinutes:  r.durationH * 60 + r.durationM,
+      subject:       r.subject,
+      method:        r.method     || null,
+      concentration: r.concentration,
+      createdAt:     r.createdAt  || null,
+    })),
+  };
+
+  const json     = JSON.stringify(data, null, 2);
+  const blob     = new Blob([json], { type: 'application/json' });
+  const url      = URL.createObjectURL(blob);
+  const a        = document.createElement('a');
+  const dateStr  = new Date().toISOString().slice(0, 10);
+  a.href         = url;
+  a.download     = `study-records-${dateStr}.json`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+function initExport() {
+  const btn = document.getElementById('export-btn');
+  btn.addEventListener('click', () => {
+    const records = Storage.getAll();
+    if (records.length === 0) return;
+    exportJSON();
+  });
+}
+
+/* =============================================
    앱 초기화
 ============================================= */
 document.addEventListener('DOMContentLoaded', () => {
@@ -559,5 +619,6 @@ document.addEventListener('DOMContentLoaded', () => {
   initSubjectPicker();
   initConcentration();
   initForm();
+  initExport();
   renderRecords();
 });
